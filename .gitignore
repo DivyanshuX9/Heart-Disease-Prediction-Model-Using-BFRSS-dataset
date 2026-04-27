@@ -1,0 +1,17 @@
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Large data files
+*.csv
+
+# Rendered outputs
+*.html
+*.pdf
+
+# OS
+desktop.ini
+.DS_Store
+Thumbs.db

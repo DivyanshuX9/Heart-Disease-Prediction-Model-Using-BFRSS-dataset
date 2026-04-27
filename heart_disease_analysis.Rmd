@@ -1,0 +1,843 @@
+---
+title: "Heart Disease Risk Prediction — BRFSS 2015"
+author: "Divyanshu Sharma (23BDS1155) & Saumyarup Guha (23BDS1128)"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+  pdf_document:
+    toc: true
+    toc_depth: '3'
+subtitle: Data Mining (BCSE208L) | DA2 & DA3 Analysis
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo       = TRUE,
+  warning    = FALSE,
+  message    = FALSE,
+  fig.align  = "center",
+  cache      = FALSE
+)
+```
+
+---
+```{r}
+
+
+```
+
+
+# 1. Load Libraries
+
+```{r libraries}
+library(tidyverse)    
+library(scales)       
+library(corrplot)  
+library(gridExtra)
+library(ggthemes)
+library(caret)      
+library(ROSE)    
+# Models
+library(randomForest) 
+library(xgboost)     
+library(e1071)         
+library(pROC)           
+library(knitr)
+library(kableExtra)
+```
+
+---
+
+# 2. Load & Inspect Data
+
+```{r load-data}
+df_raw <- read_csv(
+  "heart_disease_health_indicators_BRFSS2015.csv",
+  show_col_types = FALSE
+)
+
+cat("Dimensions :", nrow(df_raw), "rows x", ncol(df_raw), "columns\n")
+glimpse(df_raw)
+```
+
+```{r head-table}
+kable(head(df_raw, 6),
+      caption = "First 6 rows of raw dataset") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE, font_size = 12)
+```
+
+---
+
+# 3. Exploratory Data Analysis (EDA)
+
+## 3.1 Missing Values
+
+```{r missing-values}
+missing_summary <- df_raw %>%
+  summarise(across(everything(), ~sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "Variable", values_to = "Missing") %>%
+  mutate(Pct = round(Missing / nrow(df_raw) * 100, 2)) %>%
+  arrange(desc(Missing))
+
+kable(missing_summary,
+      caption = "Missing value count per variable") %>%
+  kable_styling(bootstrap_options = c("striped","hover"),
+                full_width = FALSE)
+```
+
+> **Result:** The BRFSS 2015 dataset is complete — zero missing values in all 22 columns.
+
+## 3.2 Class Distribution (Target Variable)
+
+```{r class-dist, fig.height=5}
+class_counts <- df_raw %>%
+  count(HeartDiseaseorAttack) %>%
+  mutate(
+    Label = ifelse(HeartDiseaseorAttack == 1, "Heart Disease (1)", "No Heart Disease (0)"),
+    Pct   = n / sum(n)
+  )
+
+ggplot(class_counts, aes(x = Label, y = n, fill = Label)) +
+  geom_col(width = 0.55, show.legend = FALSE) +
+  geom_text(aes(label = paste0(comma(n), "\n(", percent(Pct, 0.1), ")")),
+            vjust = -0.4, size = 4.5, fontface = "bold") +
+  scale_fill_manual(values = c("#2ecc71","#e74c3c")) +
+  scale_y_continuous(labels = comma, expand = expansion(mult = c(0, 0.15))) +
+  labs(title   = "Target Variable Distribution",
+       subtitle = "Severe class imbalance: ~9.4 % positive cases",
+       x = NULL, y = "Count") +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+> **Key insight:** Only **9.4 %** of records are positive (heart disease). This severe imbalance demands resampling before modelling.
+
+## 3.3 Numeric Variable Distributions
+
+```{r numeric-dist, fig.height=8}
+numeric_vars <- c("BMI", "Age", "MentHlth", "PhysHlth", "GenHlth", "Education", "Income")
+
+df_raw %>%
+  select(all_of(numeric_vars), HeartDiseaseorAttack) %>%
+  mutate(HeartDiseaseorAttack = factor(HeartDiseaseorAttack,
+                                       labels = c("No HD","HD"))) %>%
+  pivot_longer(-HeartDiseaseorAttack, names_to = "Variable", values_to = "Value") %>%
+  ggplot(aes(x = Value, fill = HeartDiseaseorAttack)) +
+  geom_histogram(bins = 25, alpha = 0.75, position = "identity") +
+  facet_wrap(~Variable, scales = "free", ncol = 3) +
+  scale_fill_manual(values = c("#3498db","#e74c3c")) +
+  labs(title = "Distribution of Continuous Variables by Heart Disease Status",
+       fill = "Status", x = NULL, y = "Count") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"))
+```
+
+## 3.4 Binary Variable Prevalence
+
+```{r binary-vars, fig.height=6}
+binary_vars <- c("HighBP","HighChol","CholCheck","Smoker","Stroke",
+                 "Diabetes","PhysActivity","Fruits","Veggies",
+                 "HvyAlcoholConsump","AnyHealthcare","NoDocbcCost","DiffWalk","Sex")
+
+df_raw %>%
+  select(all_of(binary_vars), HeartDiseaseorAttack) %>%
+  mutate(HeartDiseaseorAttack = factor(HeartDiseaseorAttack,
+                                       labels = c("No HD","HD"))) %>%
+  pivot_longer(-HeartDiseaseorAttack, names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable, HeartDiseaseorAttack) %>%
+  summarise(Rate = mean(Value), .groups = "drop") %>%
+  ggplot(aes(x = reorder(Variable, Rate), y = Rate, fill = HeartDiseaseorAttack)) +
+  geom_col(position = "dodge", width = 0.7) +
+  coord_flip() +
+  scale_y_continuous(labels = percent_format(1)) +
+  scale_fill_manual(values = c("#3498db","#e74c3c")) +
+  labs(title   = "Prevalence of Binary Risk Factors by Heart Disease Status",
+       x = NULL, y = "Proportion", fill = "Status") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top",
+        plot.title = element_text(face = "bold"))
+```
+
+## 3.5 BMI Boxplot by Heart Disease Status
+
+```{r bmi-boxplot, fig.height=5}
+df_raw %>%
+  mutate(HD = factor(HeartDiseaseorAttack, labels = c("No Heart Disease","Heart Disease"))) %>%
+  ggplot(aes(x = HD, y = BMI, fill = HD)) +
+  geom_boxplot(outlier.alpha = 0.2, width = 0.45) +
+  scale_fill_manual(values = c("#3498db","#e74c3c")) +
+  labs(title   = "BMI Distribution by Heart Disease Status",
+       subtitle = "Heart disease patients tend to have higher BMI",
+       x = NULL, y = "BMI") +
+  theme_minimal(base_size = 13) +
+  theme(legend.position = "none",
+        plot.title = element_text(face = "bold"))
+```
+
+## 3.6 Age Group vs Heart Disease Proportion
+
+```{r age-prop, fig.height=5}
+df_raw %>%
+  mutate(Age    = factor(Age),
+         HD_Lab = factor(HeartDiseaseorAttack, labels = c("No HD","HD"))) %>%
+  count(Age, HD_Lab) %>%
+  group_by(Age) %>%
+  mutate(Pct = n / sum(n)) %>%
+  filter(HD_Lab == "HD") %>%
+  ggplot(aes(x = Age, y = Pct)) +
+  geom_col(fill = "#e74c3c", width = 0.7) +
+  geom_text(aes(label = percent(Pct, 1)), vjust = -0.5, size = 3.2) +
+  scale_y_continuous(labels = percent_format(1),
+                     expand = expansion(mult = c(0, 0.12))) +
+  labs(title   = "Heart Disease Rate by Age Group",
+       subtitle = "Age codes: 1 = 18–24  …  13 = 80+",
+       x = "Age Group Code", y = "% with Heart Disease") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## 3.7 Correlation Heatmap
+
+```{r corr-heatmap, fig.height=8, fig.width=9}
+cor_mat <- cor(df_raw, method = "spearman")
+
+corrplot(cor_mat,
+         method   = "color",
+         type     = "upper",
+         tl.cex   = 0.75,
+         tl.col   = "black",
+         addCoef.col = "black",
+         number.cex  = 0.45,
+         col      = colorRampPalette(c("#2980b9","white","#e74c3c"))(200),
+         title    = "Spearman Correlation — All Variables",
+         mar      = c(0,0,1,0))
+```
+
+---
+
+# 4. Preprocessing
+
+## 4.1 Type Conversion & Factor Encoding
+
+```{r preprocess}
+binary_cols <- c("HeartDiseaseorAttack","HighBP","HighChol","CholCheck","Smoker",
+                 "Stroke","Diabetes","PhysActivity","Fruits","Veggies",
+                 "HvyAlcoholConsump","AnyHealthcare","NoDocbcCost","DiffWalk","Sex")
+ 
+df <- df_raw %>%
+  mutate(across(all_of(binary_cols), factor)) %>%
+  mutate(
+    GenHlth   = as.integer(GenHlth),
+    Age       = as.integer(Age),
+    Education = as.integer(Education),
+    Income    = as.integer(Income)
+  )
+ 
+cat("Target class distribution after factoring:\n")
+print(table(df$HeartDiseaseorAttack))
+ 
+```
+
+## 4.2 Outlier Capping (BMI, MentHlth, PhysHlth)
+
+```{r outlier-cap}
+winsorise <- function(x, lo = 0.01, hi = 0.99) {
+  q <- quantile(x, c(lo, hi), na.rm = TRUE)
+  pmin(pmax(x, q[1]), q[2])
+}
+ 
+df <- df %>%
+  mutate(
+    BMI      = winsorise(BMI),
+    MentHlth = winsorise(MentHlth),
+    PhysHlth = winsorise(PhysHlth)
+  )
+ 
+cat("BMI range after capping:", range(df$BMI), "\n")
+ 
+```
+
+## 4.3 Feature Selection via Information Gain
+
+```{r info-gain}
+library(FSelector)
+entropy <- function(x) {
+  p <- table(x) / length(x)
+  p <- p[p > 0]
+  -sum(p * log2(p))
+}
+ 
+conditional_entropy <- function(feature, target) {
+  vals <- unique(feature)
+  n    <- length(target)
+  sum(sapply(vals, function(v) {
+    idx <- feature == v
+    (sum(idx) / n) * entropy(target[idx])
+  }))
+}
+ 
+info_gain <- function(feature, target) {
+  entropy(target) - conditional_entropy(feature, target)
+}
+ 
+target_vec   <- df$HeartDiseaseorAttack
+feature_cols <- setdiff(names(df), "HeartDiseaseorAttack")
+ 
+ig_scores <- sapply(feature_cols, function(col) {
+  info_gain(df[[col]], target_vec)
+})
+ 
+ig_df <- data.frame(
+  Feature  = names(ig_scores),
+  InfoGain = round(ig_scores, 6)
+) %>% arrange(desc(InfoGain))
+ 
+print(ig_df)
+```
+
+```{r ig-plot, fig.height=6}
+ggplot(ig_df, aes(x = reorder(Feature, InfoGain), y = InfoGain, fill = InfoGain)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_gradient(low = "#85c1e9", high = "#1a5276") +
+  labs(title = "Feature Importance — Information Gain",
+       x = NULL, y = "Information Gain") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+
+ 
+```
+
+```{r select-features}
+ 
+selected_features <- ig_df %>%
+  filter(InfoGain > 0.003) %>%
+  pull(Feature)
+ 
+cat("\nSelected", length(selected_features), "features:\n")
+print(selected_features)
+ 
+df_model <- df %>% select(all_of(c(selected_features, "HeartDiseaseorAttack")))
+ 
+```
+
+## 4.4 Train / Test Split (Stratified 80 / 20)
+
+```{r split}
+set.seed(42)
+train_idx <- createDataPartition(df_model$HeartDiseaseorAttack, p = 0.80, list = FALSE)
+train_raw <- df_model[ train_idx, ]
+test_set  <- df_model[-train_idx, ]
+ 
+cat("Training set size:", nrow(train_raw), "\n")
+cat("Test     set size:", nrow(test_set),  "\n")
+cat("\nClass balance in training set:\n")
+print(prop.table(table(train_raw$HeartDiseaseorAttack)))
+ 
+```
+
+## 4.5 Class Imbalance Handling — ROSE Oversampling
+
+```{r rose-balance}
+set.seed(42)
+train_bal <- ROSE(HeartDiseaseorAttack ~ .,
+                  data = train_raw,
+                  seed = 42,
+                  N    = nrow(train_raw))$data
+ 
+cat("Class distribution AFTER ROSE:\n")
+print(prop.table(table(train_bal$HeartDiseaseorAttack)))
+```
+
+---
+
+# 5. Modelling
+
+We train three classifiers and compare them on the held-out test set.
+
+| Model | Rationale |
+|-------|-----------|
+| Logistic Regression | Interpretable baseline; works well with binary outcomes |
+| Random Forest | Ensemble, handles non-linearity & feature interactions |
+| XGBoost | State-of-the-art gradient boosting; best on tabular imbalanced data |
+
+## 5.1 Cross-Validation Setup
+
+```{r cv-control}
+ctrl <- trainControl(
+  method          = "cv",
+  number          = 5,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,   # reports ROC / Sens / Spec
+  savePredictions = "final"
+)
+
+# Re-level target to valid R variable names
+levels(train_bal$HeartDiseaseorAttack) <- c("NoHD", "HD")
+levels(test_set$HeartDiseaseorAttack)  <- c("NoHD", "HD")
+```
+
+## 5.2 Logistic Regression
+
+```{r logistic, cache=TRUE}
+set.seed(42)
+model_lr <- train(
+  HeartDiseaseorAttack ~ .,
+  data      = train_bal,
+  method    = "glm",
+  family    = "binomial",
+  trControl = ctrl,
+  metric    = "ROC"
+)
+
+cat("Logistic Regression — 5-fold CV ROC:", round(max(model_lr$results$ROC), 4), "\n")
+```
+
+## 5.3 Random Forest
+
+```{r rf, cache=TRUE}
+set.seed(42)
+bal_idx   <- createDataPartition(train_bal$HeartDiseaseorAttack, p = 0.20, list = FALSE)
+train_fast <- train_bal[bal_idx, ]
+ 
+cat("Training RF on", nrow(train_fast), "rows (stratified 20% subsample)\n")
+cat("Class balance in subsample:\n")
+print(prop.table(table(train_fast$HeartDiseaseorAttack)))
+ 
+ctrl_fast <- trainControl(
+  method          = "cv",
+  number          = 3,  
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  allowParallel   = FALSE
+)
+ 
+model_rf <- train(
+  HeartDiseaseorAttack ~ .,
+  data     = train_fast,
+  method   = "rf",
+  trControl = ctrl_fast,
+  metric   = "ROC",
+  tuneGrid = expand.grid(mtry = 5),   
+  ntree    = 100                      
+)
+ 
+cat("\nRandom Forest — CV ROC:", round(max(model_rf$results$ROC), 4), "\n")
+print(model_rf$finalModel)
+ 
+```
+
+## 5.4 XGBoost
+
+```{r xgb, cache=TRUE}
+library(xgboost)
+to_numeric_df <- function(df) {
+  as.data.frame(lapply(df, function(x) as.numeric(as.character(x))))
+}
+train_num <- to_numeric_df(train_bal)
+test_num  <- to_numeric_df(test_set)
+ 
+train_label <- ifelse(train_num$HeartDiseaseorAttack == 1, 1L, 0L)
+test_label  <- ifelse(test_num$HeartDiseaseorAttack  == 1, 1L, 0L)
+
+if (all(is.na(train_label))) {
+  train_label <- ifelse(train_bal$HeartDiseaseorAttack == "HD", 1L, 0L)
+  test_label  <- ifelse(test_set$HeartDiseaseorAttack  == "HD", 1L, 0L)
+}
+ 
+train_mat <- as.matrix(train_num[, colnames(train_num) != "HeartDiseaseorAttack"])
+test_mat  <- as.matrix(test_num[,  colnames(test_num)  != "HeartDiseaseorAttack"])
+ 
+cat("Train matrix:", nrow(train_mat), "x", ncol(train_mat), "\n")
+cat("Test  matrix:", nrow(test_mat),  "x", ncol(test_mat),  "\n")
+cat("Label distribution (train):\n"); print(table(train_label))
+cat("Label distribution (test):\n");  print(table(test_label))
+ 
+dtrain <- xgb.DMatrix(data = train_mat, label = train_label)
+dtest  <- xgb.DMatrix(data = test_mat,  label = test_label)
+ 
+set.seed(42)
+cv_result <- xgb.cv(
+  data              = dtrain,
+  nrounds           = 150,
+  nfold             = 3,
+  objective         = "binary:logistic",
+  eval_metric       = "auc",
+  eta               = 0.1,
+  max_depth         = 5,
+  subsample         = 0.8,
+  colsample_bytree  = 0.8,
+  early_stopping_rounds = 15,
+  verbose           = 0
+)
+ 
+best_nrounds <- cv_result$best_iteration
+cat("Best nrounds from CV:", best_nrounds, "\n")
+cat("Best CV AUC:", round(max(cv_result$evaluation_log$test_auc_mean), 4), "\n")
+ 
+best_nrounds <- cv_result$best_iteration
+if (is.null(best_nrounds) || length(best_nrounds) == 0 || is.na(best_nrounds)) {
+  best_nrounds <- which.max(cv_result$evaluation_log$test_auc_mean)
+}
+cat("Best nrounds:", best_nrounds, "\n")
+params <- list(
+  objective        = "binary:logistic",
+  eval_metric      = "auc",
+  eta              = 0.1,
+  max_depth        = 5,
+  subsample        = 0.8,
+  colsample_bytree = 0.8
+)
+ 
+set.seed(42)
+xgb_final <- xgb.train(
+  params  = params,
+  data    = dtrain,
+  nrounds = best_nrounds,
+  verbose = 0
+)
+ 
+cat("XGBoost training complete.\n")
+xgb_probs <- predict(xgb_final, dtest)
+xgb_preds <- factor(ifelse(xgb_probs > 0.5, "HD", "NoHD"), levels = c("NoHD", "HD"))
+test_labels_factor <- factor(ifelse(test_label == 1, "HD", "NoHD"), levels = c("NoHD", "HD"))
+ 
+cm_xgb  <- confusionMatrix(xgb_preds, test_labels_factor, positive = "HD")
+roc_xgb <- roc(test_labels_factor, xgb_probs, levels = c("NoHD", "HD"), quiet = TRUE)
+auc_xgb <- as.numeric(auc(roc_xgb))
+ 
+cat("\n=== XGBoost Test Set Results ===\n")
+cat("AUC-ROC    :", round(auc_xgb, 4), "\n")
+cat("Accuracy   :", round(cm_xgb$overall["Accuracy"], 4), "\n")
+cat("Recall     :", round(cm_xgb$byClass["Sensitivity"], 4), "\n")
+cat("Precision  :", round(cm_xgb$byClass["Precision"], 4), "\n")
+cat("F1 Score   :", round(cm_xgb$byClass["F1"], 4), "\n")
+cat("Specificity:", round(cm_xgb$byClass["Specificity"], 4), "\n")
+res_xgb <- list(
+  name        = "XGBoost",
+  cm          = cm_xgb,
+  roc         = roc_xgb,
+  auc         = auc_xgb,
+  accuracy    = cm_xgb$overall["Accuracy"],
+  precision   = cm_xgb$byClass["Precision"],
+  recall      = cm_xgb$byClass["Sensitivity"],
+  f1          = cm_xgb$byClass["F1"],
+  specificity = cm_xgb$byClass["Specificity"]
+)
+ 
+
+```
+```{r}
+# 5.5 Naive Bayes
+install.packages("naivebayes", repos = "https://cloud.r-project.org", quiet = TRUE)
+library(naivebayes)
+set.seed(42)
+model_nb <- train(
+  HeartDiseaseorAttack ~ .,
+  data      = train_bal,
+  method    = "naive_bayes",
+  trControl = ctrl_fast,
+  metric    = "ROC"
+)
+cat("Naive Bayes — CV ROC:", round(max(model_nb$results$ROC), 4), "\n")
+```
+
+```{r}
+# 5.6 KNN
+set.seed(42)
+model_knn <- train(
+  HeartDiseaseorAttack ~ .,
+  data      = train_fast, # same 20% subsample used for RF
+  method    = "knn",
+  trControl = ctrl_fast,
+  metric    = "ROC",
+  tuneGrid  = expand.grid(k = c(5, 9, 15)),
+  preProcess = c("center", "scale")   # KNN needs scaling
+)
+cat("KNN — Best k:", model_knn$bestTune$k, "\n")
+cat("KNN — CV ROC:", round(max(model_knn$results$ROC), 4), "\n")
+```
+---
+
+
+## 5.7 Hybrid Model (Naive Bayes + XGBoost)
+
+```{r hybrid-nb-xgb, cache=TRUE}
+# 5.7 Hybrid Stacked Ensemble — NB + XGBoost 
+nb_oof <- model_nb$pred %>%
+  arrange(rowIndex) %>%
+  pull(HD)
+
+xgb_oof_probs <- predict(xgb_final, dtrain)  
+
+cat("NB  probs length:", length(nb_oof), "\n")
+cat("XGB probs length:", length(xgb_oof_probs), "\n")
+
+min_len       <- min(length(nb_oof), length(xgb_oof_probs))
+nb_oof        <- nb_oof[1:min_len]
+xgb_oof_probs <- xgb_oof_probs[1:min_len]
+true_labels   <- train_label[1:min_len]
+
+meta_train <- data.frame(
+  nb_prob  = nb_oof,
+  xgb_prob = xgb_oof_probs,
+  label    = factor(ifelse(true_labels == 1, "HD", "NoHD"),
+                    levels = c("NoHD", "HD"))
+)
+
+cat("Meta-train dims:", dim(meta_train), "\n")
+cat("Meta-train balance:\n")
+print(prop.table(table(meta_train$label)))
+
+nb_test_probs  <- predict(model_nb, newdata = test_set, type = "prob")[, "HD"]
+xgb_test_probs <- xgb_probs   # already computed as predict(xgb_final, dtest)
+
+meta_test <- data.frame(
+  nb_prob  = nb_test_probs,
+  xgb_prob = xgb_test_probs
+)
+
+
+## Step 4: Train meta-learner ----
+ctrl_meta <- trainControl(
+  method          = "cv",
+  number          = 3,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+set.seed(42)
+model_hybrid <- train(
+  label ~ .,
+  data      = meta_train,
+  method    = "glm",
+  family    = "binomial",
+  trControl = ctrl_meta,
+  metric    = "ROC"
+)
+
+cat("\nHybrid — Meta-learner CV ROC:",
+    round(max(model_hybrid$results$ROC), 4), "\n")
+
+hybrid_probs <- predict(model_hybrid, newdata = meta_test, type = "prob")[, "HD"]
+hybrid_preds <- factor(ifelse(hybrid_probs > 0.5, "HD", "NoHD"),
+                       levels = c("NoHD", "HD"))
+test_labels_factor <- factor(ifelse(test_label == 1, "HD", "NoHD"),
+                             levels = c("NoHD", "HD"))
+
+cm_hybrid  <- confusionMatrix(hybrid_preds, test_labels_factor, positive = "HD")
+roc_hybrid <- roc(test_labels_factor, hybrid_probs,
+                  levels = c("NoHD", "HD"), quiet = TRUE)
+auc_hybrid <- as.numeric(auc(roc_hybrid))
+
+cat("\n=== Hybrid Ensemble (NB + XGBoost) ===\n")
+cat("AUC-ROC    :", round(auc_hybrid, 4), "\n")
+cat("Accuracy   :", round(cm_hybrid$overall["Accuracy"], 4), "\n")
+cat("Recall     :", round(cm_hybrid$byClass["Sensitivity"], 4), "\n")
+cat("Precision  :", round(cm_hybrid$byClass["Precision"], 4), "\n")
+cat("F1 Score   :", round(cm_hybrid$byClass["F1"], 4), "\n")
+cat("Specificity:", round(cm_hybrid$byClass["Specificity"], 4), "\n")
+
+res_hybrid <- list(
+  name        = "Hybrid (NB + XGBoost)",
+  cm          = cm_hybrid,
+  roc         = roc_hybrid,
+  auc         = auc_hybrid,
+  accuracy    = cm_hybrid$overall["Accuracy"],
+  precision   = cm_hybrid$byClass["Precision"],
+  recall      = cm_hybrid$byClass["Sensitivity"],
+  f1          = cm_hybrid$byClass["F1"],
+  specificity = cm_hybrid$byClass["Specificity"]
+)
+```
+
+# 6. Model Evaluation on Test Set
+
+```{r eval-helper}
+
+eval_model <- function(model, test_data, model_name) {
+  preds    <- predict(model, newdata = test_data)
+  probs    <- predict(model, newdata = test_data, type = "prob")[, "HD"]
+  cm       <- confusionMatrix(preds, test_data$HeartDiseaseorAttack, positive = "HD")
+  roc_obj  <- roc(test_data$HeartDiseaseorAttack, probs,
+                  levels = c("NoHD","HD"), quiet = TRUE)
+  auc_val  <- auc(roc_obj)
+  list(
+    name        = model_name,
+    cm          = cm,
+    roc         = roc_obj,
+    auc         = as.numeric(auc_val),
+    accuracy    = cm$overall["Accuracy"],
+    precision   = cm$byClass["Precision"],
+    recall      = cm$byClass["Sensitivity"],
+    f1          = cm$byClass["F1"],
+    specificity = cm$byClass["Specificity"]
+  )
+}
+
+# LR and RF use caret's predict  eval_model works fine for them
+res_lr <- eval_model(model_lr, test_set, "Logistic Regression")
+res_rf <- eval_model(model_rf, test_set, "Random Forest")
+cat("res_xgb AUC:", round(res_xgb$auc, 4), "\n")
+res_nb  <- eval_model(model_nb,  test_set, "Naive Bayes")
+res_knn <- eval_model(model_knn, test_set, "KNN")
+```
+
+
+
+
+## 6.1 Confusion Matrices
+
+```{r conf-matrix-plot, fig.height=5, fig.width=14}
+plot_cm <- function(res) {
+  tbl <- as.data.frame(res$cm$table)
+  ggplot(tbl, aes(x = Reference, y = Prediction, fill = Freq)) +
+    geom_tile(colour = "white") +
+    geom_text(aes(label = Freq), size = 7, fontface = "bold") +
+    scale_fill_gradient(low = "#d6eaf8", high = "#1a5276") +
+    labs(title = res$name, x = "Actual", y = "Predicted") +
+    theme_minimal(base_size = 13) +
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold", hjust = 0.5))
+}
+
+grid.arrange(plot_cm(res_lr), plot_cm(res_rf), plot_cm(res_xgb),
+             plot_cm(res_nb), plot_cm(res_knn), plot_cm(res_hybrid), ncol = 3)
+```
+
+## 6.2 Performance Metrics Comparison
+
+```{r metrics-table}
+metrics_df <- data.frame(
+  Model       = c("Logistic Regression","Random Forest","XGBoost",
+                "Naive Bayes","KNN","Hybrid NB+XGBoost"),
+  Accuracy    = round(c(res_lr$accuracy,    res_rf$accuracy,    res_xgb$accuracy,    res_nb$accuracy,    res_knn$accuracy, res_hybrid$accuracy),    4),
+  Precision   = round(c(res_lr$precision,   res_rf$precision,   res_xgb$precision,   res_nb$precision,   res_knn$precision,  res_hybrid$precision),   4),
+  Recall      = round(c(res_lr$recall,      res_rf$recall,      res_xgb$recall,      res_nb$recall,      res_knn$recall,  res_hybrid$recall),      4),
+  F1_Score    = round(c(res_lr$f1,          res_rf$f1,          res_xgb$f1,          res_nb$f1,          res_knn$f1,  res_hybrid$f1),          4),
+  Specificity = round(c(res_lr$specificity, res_rf$specificity, res_xgb$specificity, res_nb$specificity, res_knn$specificity, res_hybrid$specificity), 4),
+  AUC_ROC     = round(c(res_lr$auc,         res_rf$auc,         res_xgb$auc,         res_nb$auc,         res_knn$auc,  res_hybrid$auc),         4)
+)
+print(metrics_df)
+
+kable(metrics_df,
+      caption = "Test Set Performance Metrics — All Models") %>%
+  kable_styling(bootstrap_options = c("striped","hover","condensed"),
+                full_width = FALSE) %>%
+  column_spec(7, bold = TRUE, color = "#1a5276") %>%   # highlight AUC column
+  row_spec(which.max(metrics_df$AUC_ROC), bold = TRUE, background = "#d5f5e3")
+```
+
+## 6.3 ROC Curves
+
+```{r roc-curves, fig.height=6}
+plot(res_lr$roc,  col = "#3498db", lwd = 2, main = "ROC Curves — All Models")
+plot(res_rf$roc,  col = "#e74c3c", lwd = 2, add = TRUE)
+plot(res_xgb$roc, col = "#2ecc71", lwd = 2, add = TRUE)
+abline(a = 0, b = 1, lty = 2, col = "grey60")
+legend("bottomright",
+       legend = paste0(c("Logistic Reg", "Random Forest", "XGBoost"),
+                       "  AUC = ",
+                       round(c(res_lr$auc, res_rf$auc, res_xgb$auc), 3)),
+       col    = c("#3498db","#e74c3c","#2ecc71"),
+       lwd    = 2,
+       bty    = "n",
+       cex    = 0.95)
+plot(res_nb$roc,  col = "#9b59b6", lwd = 2, add = TRUE)
+plot(res_knn$roc, col = "#f39c12", lwd = 2, add = TRUE)
+plot(res_hybrid$roc, col = "#e67e22", lwd = 2, add = TRUE)
+# and add "Hybrid NB+XGB" to the legend vectors with col "#e67e22"
+# Update legend to include all 5 models
+legend("bottomright",
+       legend = paste0(c("Logistic Reg","Random Forest","XGBoost","Naive Bayes","KNN","Hybrid"),
+                       "  AUC = ",
+                       round(c(res_lr$auc, res_rf$auc, res_xgb$auc, res_nb$auc, res_knn$auc), 3)),
+       col = c("#3498db","#e74c3c","#2ecc71","#9b59b6","#f39c12","#e67e22"),
+       lwd = 2, bty = "n", cex = 0.85)
+```
+
+---
+
+# 7. Feature Importance
+
+## 7.1 Random Forest Variable Importance
+
+```{r rf-importance, fig.height=6}
+rf_imp <- varImp(model_rf)$importance %>%
+  rownames_to_column("Feature") %>%
+  rename(Importance = Overall) %>%
+  arrange(desc(Importance))
+
+ggplot(rf_imp, aes(x = reorder(Feature, Importance), y = Importance, fill = Importance)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_gradient(low = "#85c1e9", high = "#1b4f72") +
+  labs(title = "Random Forest — Variable Importance",
+       x = NULL, y = "Mean Decrease in Gini") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+## 7.2 XGBoost Variable Importance
+
+```{r xgb-importance, fig.height=6}
+xgb_imp_raw <- xgb.importance(feature_names = colnames(train_mat), model = xgb_final)
+ 
+xgb_imp <- as.data.frame(xgb_imp_raw) %>%
+  select(Feature, Gain) %>%
+  rename(Importance = Gain) %>%
+  arrange(desc(Importance))
+ 
+ggplot(xgb_imp, aes(x = reorder(Feature, Importance), y = Importance, fill = Importance)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_gradient(low = "#a9dfbf", high = "#1e8449") +
+  labs(title = "XGBoost — Variable Importance (Gain)", x = NULL, y = "Gain") +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold"))
+```
+
+---
+
+# 8. Best Model Summary & Clinical Interpretation
+
+```{r best-model-summary}
+best_idx <- which.max(metrics_df$AUC_ROC)
+cat("=== Best Model:", metrics_df$Model[best_idx], "===\n\n")
+cat("AUC-ROC    :", metrics_df$AUC_ROC[best_idx], "\n")
+cat("Accuracy   :", metrics_df$Accuracy[best_idx], "\n")
+cat("Recall     :", metrics_df$Recall[best_idx],
+    " (sensitivity — fraction of true heart disease cases caught)\n")
+cat("Precision  :", metrics_df$Precision[best_idx], "\n")
+cat("F1 Score   :", metrics_df$F1_Score[best_idx], "\n")
+cat("Specificity:", metrics_df$Specificity[best_idx], "\n")
+```
+
+**Interpretation of key risk factors (from both RF and XGBoost importance rankings):**
+
+| Rank | Feature | Clinical Significance |
+|------|---------|----------------------|
+| 1 | `GenHlth` | Self-rated general health is the single strongest predictor — poor health consistently correlates with CVD |
+| 2 | `Age` | Heart disease risk rises sharply after age group 7 (50–54 years) |
+| 3 | `HighBP` | Hypertension is a leading modifiable CVD risk factor |
+| 4 | `DiffWalk` | Difficulty walking signals underlying cardiovascular or metabolic compromise |
+| 5 | `Diabetes` | Diabetic patients face 2–4× higher CVD risk |
+| 6 | `BMI` | Overweight and obesity amplify multiple metabolic risk pathways |
+| 7 | `HighChol` | High cholesterol directly contributes to atherosclerosis |
+| 8 | `PhysHlth` | Days of poor physical health reflect cumulative disease burden |
+
+---
+
+
