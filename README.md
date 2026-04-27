@@ -9,7 +9,7 @@
 
 This project builds and evaluates multiple machine learning classifiers to predict heart disease risk using the CDC Behavioral Risk Factor Surveillance System (BRFSS) 2015 survey data. The dataset contains 22 health indicator features across 253,680 respondents.
 
-<img src="BRFSS%202015%20Data%20Processing-2026-04-05-103839.png" width="600" alt="BRFSS 2015 Data Processing Workflow">
+<img src="BRFSS%202015%20Data%20Processing-2026-04-05-103839.png" width="450" alt="BRFSS 2015 Data Processing Workflow">
 
 ---
 
